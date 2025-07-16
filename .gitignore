@@ -1,0 +1,16 @@
+NFC-Android/*.iml
+NFC-Android/.gradle/
+NFC-Android/.idea/
+NFC-Android/local.properties
+NFC-Android/.idea/caches
+NFC-Android/.idea/libraries
+NFC-Android/.idea/modules.xml
+NFC-Android/.idea/workspace.xml
+NFC-Android/.idea/navEditor.xml
+NFC-Android/.idea/assetWizardSettings.xml
+NFC-Android/.DS_Store
+NFC-Android/build
+NFC-Android/captures
+NFC-Android/.externalNativeBuild
+NFC-Android/.cxx
+NFC-Android/local.properties
