@@ -28,11 +28,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.nfc.ui.theme.NFCTheme
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import java.text.SimpleDateFormat
-import java.util.*
+import com.example.nfc.model.NFCReadResult
+import com.example.nfc.model.MRTDService
 
 // Add import for MainScreen
 import com.example.nfc.ui.MainScreen
@@ -43,7 +40,7 @@ class MainActivity : ComponentActivity() {
     private var nfcAdapter: NfcAdapter? = null
     private lateinit var pendingIntent: PendingIntent
     private val statusState: MutableState<AppStatus> = mutableStateOf(AppStatus.WAITING)
-    private val jsonState: MutableState<String?> = mutableStateOf(null)
+    private val resultState: MutableState<NFCReadResult?> = mutableStateOf(null)
     private val docNumber = mutableStateOf("E17113085")
     private val dob = mutableStateOf("160115")
     private val expiry = mutableStateOf("280114")
@@ -73,10 +70,10 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     MainScreen(
                         status = statusState.value,
-                        json = jsonState.value,
+                        result = resultState.value,
                         modifier = Modifier.padding(innerPadding),
                         onRetry = {
-                            jsonState.value = null
+                            resultState.value = null
                             statusState.value = AppStatus.READY
                         },
                         docNumber = docNumber.value,
@@ -115,7 +112,7 @@ class MainActivity : ComponentActivity() {
         val expStr = expiry.value
 
         if (doc.isBlank() || dobStr.length != 6 || expStr.length != 6) {
-            jsonState.value = "{\"error\":\"Invalid MRZ fields\"}"
+            resultState.value = NFCReadResult(success = false, errorMessage = "Invalid MRZ fields")
             statusState.value = AppStatus.WAITING
             return
         }
@@ -125,7 +122,7 @@ class MainActivity : ComponentActivity() {
                 expStr + calculateCheckDigit(expStr)
 
         val result = runCatching {
-            val isoDep = IsoDep.get(tag) ?: return@runCatching "{\"error\":\"IsoDep not supported\"}"
+            val isoDep = IsoDep.get(tag) ?: return@runCatching NFCReadResult(success = false, errorMessage = "IsoDep not supported")
             isoDep.connect()
 
             val selectApdu = byteArrayOf(
@@ -135,7 +132,7 @@ class MainActivity : ComponentActivity() {
             val selectResponse = isoDep.transceive(selectApdu)
             if (!selectResponse.takeLast(2).toByteArray().contentEquals(byteArrayOf(0x90.toByte(), 0x00.toByte()))) {
                 isoDep.close()
-                return@runCatching "{\"error\":\"Failed to select ePassport applet\"}"
+                return@runCatching NFCReadResult(success = false, errorMessage = "Failed to select ePassport applet")
             }
 
             val readBinary = byteArrayOf(
@@ -145,19 +142,15 @@ class MainActivity : ComponentActivity() {
 
             isoDep.close()
 
-            val hex = dg1Response.joinToString("") { "%02X".format(it) }
             val text = dg1Response.map { if (it in 0x20..0x7E) it.toInt().toChar() else '.' }.joinToString("")
-
-            "{" +
-                    "\"mrzInfo\":\"$mrzInfo\"," +
-                    "\"dg1Hex\":\"$hex\"," +
-                    "\"ascii\":\"$text\"}"
+            val idData = MRTDService.parseDG1Data(text)
+            NFCReadResult(success = true, dg1Info = text, idDocumentData = idData)
         }.getOrElse {
-            "{\"error\":\"${it.message}\"}"
+            NFCReadResult(success = false, errorMessage = it.message)
         }
 
-        jsonState.value = result
-        statusState.value = if (result.contains("error")) AppStatus.WAITING else AppStatus.SUCCESS
+        resultState.value = result
+        statusState.value = if (result.success) AppStatus.SUCCESS else AppStatus.WAITING
     }
 
     fun calculateCheckDigit(data: String): String {

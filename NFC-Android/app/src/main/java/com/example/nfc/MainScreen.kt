@@ -16,17 +16,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.nfc.AppStatus
 import com.example.nfc.R
-import kotlinx.serialization.json.Json
-import java.text.SimpleDateFormat
-import java.util.*
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.*
+import com.example.nfc.model.NFCReadResult
 
 @Composable
 fun MainScreen(
     status: AppStatus,
-    json: String?,
+    result: NFCReadResult?,
     modifier: Modifier = Modifier,
     onRetry: () -> Unit,
     docNumber: String,
@@ -67,47 +62,16 @@ fun MainScreen(
             label = { Text("Date of Expiry (YYMMDD)") }
         )
 
-        json?.let {
-            val parsed = Json.parseToJsonElement(it).jsonObject
-            parsed["error"]?.jsonPrimitive?.content?.let { error ->
-                Text("Error: $error", color = Color.Red)
-            }
-            parsed["mrzInfo"]?.jsonPrimitive?.content?.let { info ->
-                Text("MRZ Info: $info")
-            }
-            parsed["dg1Hex"]?.jsonPrimitive?.content?.let { hex ->
-                Text("DG1 (Hex): $hex")
-            }
-            parsed["ascii"]?.jsonPrimitive?.content?.let { txt ->
-                Text("DG1 (ASCII): $txt")
-
-                val parts = txt.split("<<")
-                if (parts.size >= 2) {
-                    val nameParts = parts[0].split("<")
-                    val surname = nameParts.firstOrNull()?.replace("<", " ")?.trim()
-                    val givenNames = nameParts.drop(1).joinToString(" ") { it.replace("<", " ") }.trim()
-                    val nationality = parts[1].take(3)
-                    val birthDateRaw = parts[1].substring(3, 9)
-                    val birthDate = try {
-                        SimpleDateFormat("yyMMdd", Locale.US).parse(birthDateRaw)?.let {
-                            SimpleDateFormat("yyyy-MM-dd", Locale.US).format(it)
-                        } ?: birthDateRaw
-                    } catch (e: Exception) { birthDateRaw }
-                    val gender = parts[1].substring(9, 10)
-                    val expiryDateRaw = parts[1].substring(10, 16)
-                    val expiryDate = try {
-                        SimpleDateFormat("yyMMdd", Locale.US).parse(expiryDateRaw)?.let {
-                            SimpleDateFormat("yyyy-MM-dd", Locale.US).format(it)
-                        } ?: expiryDateRaw
-                    } catch (e: Exception) { expiryDateRaw }
-
-                    Text("Surname: $surname")
-                    Text("Given Names: $givenNames")
-                    Text("Nationality: $nationality")
-                    Text("Birth Date: $birthDate")
-                    Text("Gender: $gender")
-                    Text("Expiry Date: $expiryDate")
-                }
+        result?.let { res ->
+            res.errorMessage?.let { Text("Error: $it", color = Color.Red) }
+            res.dg1Info?.let { Text("DG1: $it") }
+            res.idDocumentData?.let { doc ->
+                doc.lastname?.let { Text("Surname: $it") }
+                doc.firstName?.let { Text("Given Names: $it") }
+                doc.nationality?.let { Text("Nationality: $it") }
+                doc.dateOfBirth?.let { Text("Birth Date: $it") }
+                doc.sex?.let { Text("Gender: $it") }
+                doc.dateOfExpiry?.let { Text("Expiry Date: $it") }
             }
         }
 

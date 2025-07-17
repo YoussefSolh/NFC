@@ -1,22 +1,21 @@
 package com.example.nfc.ui
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import java.text.SimpleDateFormat
-import java.util.*
+import com.example.nfc.model.NFCReadResult
 
 @Composable
 fun ResultScreen(
-    json: String?,
+    result: NFCReadResult?,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -29,36 +28,20 @@ fun ResultScreen(
     ) {
         Text("Scan Result", fontWeight = FontWeight.Bold, fontSize = 20.sp)
 
-        json?.let {
-            val parsed = Json.parseToJsonElement(it).jsonObject
-            parsed["ascii"]?.jsonPrimitive?.content?.let { txt ->
-                val parts = txt.split("<<")
-                if (parts.size >= 2) {
-                    val nameParts = parts[0].split("<")
-                    val surname = nameParts.firstOrNull()?.replace("<", " ")?.trim()
-                    val givenNames = nameParts.drop(1).joinToString(" ") { it.replace("<", " ") }.trim()
-                    val nationality = parts[1].take(3)
-                    val birthDateRaw = parts[1].substring(3, 9)
-                    val birthDate = try {
-                        SimpleDateFormat("yyMMdd", Locale.US).parse(birthDateRaw)?.let {
-                            SimpleDateFormat("yyyy-MM-dd", Locale.US).format(it)
-                        } ?: birthDateRaw
-                    } catch (e: Exception) { birthDateRaw }
-                    val gender = parts[1].substring(9, 10)
-                    val expiryDateRaw = parts[1].substring(10, 16)
-                    val expiryDate = try {
-                        SimpleDateFormat("yyMMdd", Locale.US).parse(expiryDateRaw)?.let {
-                            SimpleDateFormat("yyyy-MM-dd", Locale.US).format(it)
-                        } ?: expiryDateRaw
-                    } catch (e: Exception) { expiryDateRaw }
-
-                    Text("Surname: $surname")
-                    Text("Given Names: $givenNames")
-                    Text("Nationality: $nationality")
-                    Text("Birth Date: $birthDate")
-                    Text("Gender: $gender")
-                    Text("Expiry Date: $expiryDate")
-                }
+        result?.let { res ->
+            res.idDocumentData?.let { doc ->
+                doc.firstName?.let { Text("First Name: $it") }
+                doc.secondName?.let { Text("Second Name: $it") }
+                doc.thirdName?.let { Text("Third Name: $it") }
+                doc.lastname?.let { Text("Surname: $it") }
+                doc.nationality?.let { Text("Nationality: $it") }
+                doc.dateOfBirth?.let { Text("Birth Date: $it") }
+                doc.sex?.let { Text("Gender: $it") }
+                doc.dateOfExpiry?.let { Text("Expiry Date: $it") }
+            }
+            res.idImage?.let { bytes ->
+                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                bitmap?.let { Image(bitmap = it.asImageBitmap(), contentDescription = null) }
             }
         }
 
