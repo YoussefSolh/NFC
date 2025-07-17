@@ -4,11 +4,9 @@ import android.Manifest
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.nfc.NdefMessage
-import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
 import android.nfc.Tag
-import android.nfc.tech.Ndef
+import android.nfc.tech.IsoDep
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -16,18 +14,10 @@ import androidx.activity.result.contract.ActivityResultContracts.RequestPermissi
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.MutableState
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,7 +28,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.nfc.ui.theme.NFCTheme
-import java.nio.charset.Charset
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.text.SimpleDateFormat
+import java.util.*
+
+// Add import for MainScreen
+import com.example.nfc.ui.MainScreen
 
 enum class AppStatus { READY, IN_PROGRESS, SUCCESS, WAITING }
 
@@ -47,6 +44,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var pendingIntent: PendingIntent
     private val statusState: MutableState<AppStatus> = mutableStateOf(AppStatus.WAITING)
     private val jsonState: MutableState<String?> = mutableStateOf(null)
+    private val docNumber = mutableStateOf("")
+    private val dob = mutableStateOf("")
+    private val expiry = mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,7 +74,17 @@ class MainActivity : ComponentActivity() {
                     MainScreen(
                         status = statusState.value,
                         json = jsonState.value,
-                        modifier = Modifier.padding(innerPadding)
+                        modifier = Modifier.padding(innerPadding),
+                        onRetry = {
+                            jsonState.value = null
+                            statusState.value = AppStatus.READY
+                        },
+                        docNumber = docNumber.value,
+                        onDocNumberChange = { docNumber.value = it },
+                        dateOfBirth = dob.value,
+                        onDobChange = { dob.value = it },
+                        dateOfExpiry = expiry.value,
+                        onExpiryChange = { expiry.value = it }
                     )
                 }
             }
@@ -83,8 +93,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (statusState.value == AppStatus.READY) {
-            nfcAdapter?.enableForegroundDispatch(this, pendingIntent, null, null)
+        window.decorView.post {
+            if (statusState.value == AppStatus.READY) {
+                nfcAdapter?.enableForegroundDispatch(this, pendingIntent, null, null)
+            }
         }
     }
 
@@ -93,68 +105,74 @@ class MainActivity : ComponentActivity() {
         nfcAdapter?.disableForegroundDispatch(this)
     }
 
-    override fun onNewIntent(intent: Intent?) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val tag: Tag = intent?.getParcelableExtra(NfcAdapter.EXTRA_TAG) ?: return
+        val tag: Tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG) ?: return
         statusState.value = AppStatus.IN_PROGRESS
-        jsonState.value = readTag(tag)
-        statusState.value = AppStatus.SUCCESS
-    }
 
-    private fun readTag(tag: Tag): String {
-        return try {
-            val ndef = Ndef.get(tag)
-            ndef.connect()
-            val msg: NdefMessage = ndef.ndefMessage
-            val records = msg.records.mapIndexed { index: Int, record: NdefRecord ->
-                val payload = String(record.payload, Charset.forName("UTF-8"))
-                "\"record$index\": \"$payload\""
+        val doc = docNumber.value.padEnd(9, '<')
+        val dobStr = dob.value
+        val expStr = expiry.value
+
+        if (doc.isBlank() || dobStr.length != 6 || expStr.length != 6) {
+            jsonState.value = "{\"error\":\"Invalid MRZ fields\"}"
+            statusState.value = AppStatus.WAITING
+            return
+        }
+
+        val mrzInfo = doc + calculateCheckDigit(doc) +
+                dobStr + calculateCheckDigit(dobStr) +
+                expStr + calculateCheckDigit(expStr)
+
+        val result = runCatching {
+            val isoDep = IsoDep.get(tag) ?: return@runCatching "{\"error\":\"IsoDep not supported\"}"
+            isoDep.connect()
+
+            val selectApdu = byteArrayOf(
+                0x00.toByte(), 0xA4.toByte(), 0x04.toByte(), 0x0C.toByte(), 0x07.toByte(),
+                0xA0.toByte(), 0x00.toByte(), 0x00.toByte(), 0x02.toByte(), 0x47.toByte(), 0x10.toByte(), 0x01.toByte()
+            )
+            val selectResponse = isoDep.transceive(selectApdu)
+            if (!selectResponse.takeLast(2).toByteArray().contentEquals(byteArrayOf(0x90.toByte(), 0x00.toByte()))) {
+                isoDep.close()
+                return@runCatching "{\"error\":\"Failed to select ePassport applet\"}"
             }
-            ndef.close()
-            "{ " + records.joinToString(",") + " }"
-        } catch (e: Exception) {
-            "{}"
-        }
-    }
-}
 
-@Composable
-fun MainScreen(status: AppStatus, json: String?, modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Image(
-            painter = painterResource(id = R.mipmap.ic_launcher_round),
-            contentDescription = null,
-            modifier = Modifier.size(120.dp)
-        )
-        Text(text = "NFC Reader", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-        StatusBadge(status = status)
-        json?.let {
-            Text(text = it)
-        }
-    }
-}
+            val readBinary = byteArrayOf(
+                0x00.toByte(), 0xB0.toByte(), 0x00.toByte(), 0x00.toByte(), 0x10.toByte()
+            )
+            val dg1Response = isoDep.transceive(readBinary)
 
-@Composable
-fun StatusBadge(status: AppStatus) {
-    val color = when (status) {
-        AppStatus.READY -> Color.Yellow
-        AppStatus.IN_PROGRESS -> Color.Blue
-        AppStatus.SUCCESS -> Color.Green
-        AppStatus.WAITING -> Color.Gray
+            isoDep.close()
+
+            val hex = dg1Response.joinToString("") { "%02X".format(it) }
+            val text = dg1Response.map { if (it in 0x20..0x7E) it.toInt().toChar() else '.' }.joinToString("")
+
+            "{" +
+                    "\"mrzInfo\":\"$mrzInfo\"," +
+                    "\"dg1Hex\":\"$hex\"," +
+                    "\"ascii\":\"$text\"}"
+        }.getOrElse {
+            "{\"error\":\"${it.message}\"}"
+        }
+
+        jsonState.value = result
+        statusState.value = if (result.contains("error")) AppStatus.WAITING else AppStatus.SUCCESS
     }
-    Box(
-        modifier = Modifier
-            .size(80.dp)
-            .clip(CircleShape)
-            .background(color),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(text = status.name, color = Color.White)
+
+    fun calculateCheckDigit(data: String): String {
+        val weights = intArrayOf(7, 3, 1)
+        val chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ<"
+        var sum = 0
+        for ((i, c) in data.withIndex()) {
+            val value = when {
+                c in '0'..'9' -> c - '0'
+                c in 'A'..'Z' -> c - 'A' + 10
+                c == '<' -> 0
+                else -> 0
+            }
+            sum += value * weights[i % 3]
+        }
+        return (sum % 10).toString()
     }
 }
