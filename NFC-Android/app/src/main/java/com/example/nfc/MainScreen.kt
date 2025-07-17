@@ -23,7 +23,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.*
 
-
 @Composable
 fun MainScreen(
     status: AppStatus,
@@ -81,6 +80,34 @@ fun MainScreen(
             }
             parsed["ascii"]?.jsonPrimitive?.content?.let { txt ->
                 Text("DG1 (ASCII): $txt")
+
+                val parts = txt.split("<<")
+                if (parts.size >= 2) {
+                    val nameParts = parts[0].split("<")
+                    val surname = nameParts.firstOrNull()?.replace("<", " ")?.trim()
+                    val givenNames = nameParts.drop(1).joinToString(" ") { it.replace("<", " ") }.trim()
+                    val nationality = parts[1].take(3)
+                    val birthDateRaw = parts[1].substring(3, 9)
+                    val birthDate = try {
+                        SimpleDateFormat("yyMMdd", Locale.US).parse(birthDateRaw)?.let {
+                            SimpleDateFormat("yyyy-MM-dd", Locale.US).format(it)
+                        } ?: birthDateRaw
+                    } catch (e: Exception) { birthDateRaw }
+                    val gender = parts[1].substring(9, 10)
+                    val expiryDateRaw = parts[1].substring(10, 16)
+                    val expiryDate = try {
+                        SimpleDateFormat("yyMMdd", Locale.US).parse(expiryDateRaw)?.let {
+                            SimpleDateFormat("yyyy-MM-dd", Locale.US).format(it)
+                        } ?: expiryDateRaw
+                    } catch (e: Exception) { expiryDateRaw }
+
+                    Text("Surname: $surname")
+                    Text("Given Names: $givenNames")
+                    Text("Nationality: $nationality")
+                    Text("Birth Date: $birthDate")
+                    Text("Gender: $gender")
+                    Text("Expiry Date: $expiryDate")
+                }
             }
         }
 

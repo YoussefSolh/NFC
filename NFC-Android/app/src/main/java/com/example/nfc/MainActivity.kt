@@ -44,9 +44,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var pendingIntent: PendingIntent
     private val statusState: MutableState<AppStatus> = mutableStateOf(AppStatus.WAITING)
     private val jsonState: MutableState<String?> = mutableStateOf(null)
-    private val docNumber = mutableStateOf("")
-    private val dob = mutableStateOf("")
-    private val expiry = mutableStateOf("")
+    private val docNumber = mutableStateOf("E17113085")
+    private val dob = mutableStateOf("160115")
+    private val expiry = mutableStateOf("280114")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
