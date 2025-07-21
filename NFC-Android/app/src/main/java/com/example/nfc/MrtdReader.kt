@@ -12,6 +12,11 @@ import org.jmrtd.BACKeySpec
 import org.jmrtd.PassportService
 import org.jmrtd.lds.CardAccessFile
 import org.jmrtd.lds.PACEInfo
+import org.jmrtd.lds.icao.DG1File
+import org.jmrtd.lds.icao.DG2File
+import org.jmrtd.lds.icao.MRZInfo
+import org.jmrtd.lds.iso19794.FaceImageInfo
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.text.ParseException
 import java.text.SimpleDateFormat
@@ -19,48 +24,30 @@ import java.util.Locale
 import java.util.regex.Pattern
 
 /**
- * **MrtdReader** – high‑level reader inspired by Tananaev's *passport‑reader*.
- *
- * ✦ Tries **PACE** first (via EF.CardAccess). Falls back to **BAC** automatically.
- * ✦ After successful auth, reads **EF.COM**, **EF.SOD** and **DG1** using
- *   JMRTD's secure‐messaging‑aware `PassportService` streams (no raw APDUs).
- * ✦ Validates & normalises MRZ input before authentication (ICAO Doc 9303).
+ * High‑level reader for eMRTDs: PACE→BAC auth + DG1 & DG2 parsing.
  */
 class MrtdReader {
 
-    /* ------------------------------------------------------------------- */
-    /*  Constants                                                          */
-    /* ------------------------------------------------------------------- */
-
     companion object {
         private const val TAG = "MrtdReader"
+        private val DOC_NUM_REGEX = Pattern.compile("^[A-Z0-9<]{1,9}")
+        private val DATE_YYMMDD_REGEX = Pattern.compile("^\\d{6}")
 
-        // TLV FIDs (absolute) – JMRTD constants exist for COM/SOD/DG1
-        private const val DG1_FID = 0x0101
-
-        /* Strict MRZ patterns */
-        private val DOC_NUM_REGEX: Pattern = Pattern.compile("^[A-Z0-9<]{1,9}")
-        private val DATE_YYMMDD_REGEX: Pattern = Pattern.compile("^\\d{6}")
-
-        /** Convert "yyyy‑MM‑dd" or "yyMMdd" into YYMMDD */
         private fun normaliseDate(input: String): String? =
             if (DATE_YYMMDD_REGEX.matcher(input).matches()) input else try {
                 SimpleDateFormat("yyMMdd", Locale.US).format(
                     SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(input)!!
                 )
-            } catch (e: ParseException) { null }
+            } catch (e: ParseException) {
+                null
+            }
     }
-
-    /* ------------------------------------------------------------------- */
-    /*  Public data classes                                                */
-    /* ------------------------------------------------------------------- */
 
     data class MrzData(
         val documentNumber: String,
         val dateOfBirthYYMMDD: String,
         val dateOfExpiryYYMMDD: String
     ) {
-        /** Returns sanitised copy (padded document number, YYMMDD dates) or null if invalid. */
         fun sanitised(): MrzData? {
             val doc = documentNumber.trim().uppercase(Locale.US).replace(" ", "")
             val dob = normaliseDate(dateOfBirthYYMMDD.trim())
@@ -71,32 +58,41 @@ class MrtdReader {
         }
     }
 
-    data class RawResult(val fileId: String, val dataHex: String)
+    data class MrzFields(
+        val documentCode: String,
+        val documentNumber: String,
+        val issuingState: String,
+        val nationality: String,
+        val primaryIdentifier: String,
+        val secondaryIdentifier: String,
+        val gender: String,
+        val dateOfBirthYYMMDD: String,
+        val dateOfExpiryYYMMDD: String,
+        val optionalData1: String?,
+        val optionalData2: String?,
+        val personalNumber: String?
+    )
 
-    /* ------------------------------------------------------------------- */
-    /*  Public API                                                         */
-    /* ------------------------------------------------------------------- */
+    data class Result(
+        val mrz: MrzFields,
+        val dg1RawHex: String,
+        val dg2Image: ByteArray?
+    )
 
     /**
-     * Reads EF.COM, EF.SOD and DG1 using secure messaging after PACE/BAC.
-     * Returns list of [RawResult] with `fileId` = "COM" | "SOD" | "DG1".
+     * Perform PACE (if available) or BAC, then read DG1 & DG2 and parse both.
      */
-    suspend fun readIdCardRaw(tag: Tag, mrz: MrzData): List<RawResult> = withContext(Dispatchers.IO) {
-        val cleanMrz = mrz.sanitised() ?: run {
-            Log.e(TAG, "Invalid MRZ – aborting")
-            return@withContext emptyList()
+    suspend fun readIdCard(tag: Tag, mrzInput: MrzData): Result? = withContext(Dispatchers.IO) {
+        val cleanMrz = mrzInput.sanitised() ?: run {
+            Log.e(TAG, "Invalid MRZ – aborting")
+            return@withContext null
         }
-
-        val isoDep = IsoDep.get(tag) ?: return@withContext emptyList()
-        val results = mutableListOf<RawResult>()
-
+        val isoDep = IsoDep.get(tag) ?: return@withContext null
         var cardService: CardService? = null
         var passportService: PassportService? = null
 
         try {
             isoDep.connect()
-            Log.d(TAG, "IsoDep connected – ID=${tag.id.toHexString()}")
-
             cardService = IsoDepCardService(isoDep).apply { open() }
             passportService = PassportService(
                 cardService,
@@ -106,32 +102,43 @@ class MrtdReader {
                 false
             ).apply { open() }
 
-            // ---------------- Authentication ----------------
-            val bacKey: BACKeySpec = BACKey(
+            // Authentication: PACE -> BAC fallback
+            val bacKey = BACKey(
                 cleanMrz.documentNumber,
                 cleanMrz.dateOfBirthYYMMDD,
                 cleanMrz.dateOfExpiryYYMMDD
             )
+            val paceOk = tryPACE(passportService, bacKey)
+            if (!paceOk) passportService.doBAC(bacKey)
+            Log.i(TAG, "Auth OK – PACE=$paceOk")
 
-            val paceSucceeded = tryPace(passportService, bacKey)
-            if (!paceSucceeded) {
-                Log.i(TAG, "Attempting BAC …")
-                passportService.doBAC(bacKey)
+            // Read DG1 & DG2
+            val dg1Bytes = readEF(passportService, PassportService.EF_DG1)
+                ?: throw IllegalStateException("DG1 read failed after auth")
+            val dg2Bytes = readEF(passportService, PassportService.EF_DG2)
+
+            // Parse MRZ fields
+            val fields = parseDG1(dg1Bytes)
+
+            // Parse face image from DG2
+            val faceImage: ByteArray? = try {
+                dg2Bytes?.let {
+                    val dg2 = DG2File(ByteArrayInputStream(it))
+                    dg2.faceInfos
+                        .flatMap { fi -> fi.faceImageInfos }
+                        .firstOrNull()
+                        ?.imageInputStream
+                        ?.readBytes()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "DG2 parse error: ${e.message}")
+                null
             }
-            Log.i(TAG, "Authentication OK (PACE=$paceSucceeded)")
 
-
-
-            // ---------------- Read DG1 -------------------
-            readEfStream(passportService, DG1_FID)?.let {
-                results += RawResult("DG1", it.toHexString())
-            }
-
-            if (results.isEmpty()) Log.w(TAG, "No files readable after auth")
-            results
+            Result(fields, dg1Bytes.toHexString(), faceImage)
         } catch (e: Exception) {
             Log.e(TAG, "Reader error", e)
-            emptyList()
+            null
         } finally {
             try { passportService?.close() } catch (_: Exception) {}
             try { cardService?.close() } catch (_: Exception) {}
@@ -139,59 +146,51 @@ class MrtdReader {
         }
     }
 
-    /* ------------------------------------------------------------------- */
-    /*  Internal helpers                                                   */
-    /* ------------------------------------------------------------------- */
-
-    /** Tries PACE using EF.CardAccess; returns true if successful. */
-    private fun tryPace(service: PassportService, bacKey: BACKeySpec): Boolean {
-        return try {
-            val caInput = service.getInputStream(PassportService.EF_CARD_ACCESS)
-            val cardAccess = CardAccessFile(caInput)
-            for (info in cardAccess.securityInfos) {
-                if (info is PACEInfo) {
-                    service.doPACE(
-                        bacKey,
-                        info.objectIdentifier,
-                        PACEInfo.toParameterSpec(info.parameterId),
-                        null
-                    )
-                    Log.i(TAG, "PACE succeeded")
-                    // JMRTD requires re‑SELECT after PACE
-                    service.sendSelectApplet(true)
-                    return true
-                }
-            }
-            false
-        } catch (e: Exception) {
-            Log.w(TAG, "PACE not available / failed: ${e.message}")
-            false
+    private fun tryPACE(service: PassportService, bacKey: BACKeySpec): Boolean = try {
+        val caf = CardAccessFile(service.getInputStream(PassportService.EF_CARD_ACCESS))
+        caf.securityInfos.filterIsInstance<PACEInfo>().forEach { info ->
+            service.doPACE(bacKey, info.objectIdentifier, PACEInfo.toParameterSpec(info.parameterId), null)
         }
+        service.sendSelectApplet(true)
+        true
+    } catch (e: Exception) {
+        Log.w(TAG, "PACE unavailable: ${e.message}")
+        false
     }
 
-    /** Reads a full EF via PassportService secure messaging. */
-    private fun readEfStream(service: PassportService, fid: Int): ByteArray? {
-        return try {
-            val `in` = service.getInputStream(fid.toShort())
-            val buffer = ByteArrayOutputStream()
+    private fun readEF(service: PassportService, fid: Short): ByteArray? = try {
+        service.getInputStream(fid).use { input ->
+            val buf = ByteArrayOutputStream()
             val tmp = ByteArray(512)
             while (true) {
-                val read = `in`.read(tmp)
-                if (read < 0) break
-                buffer.write(tmp, 0, read)
+                val r = input.read(tmp).takeIf { it > 0 } ?: break
+                buf.write(tmp, 0, r)
             }
-            buffer.toByteArray().takeIf { it.isNotEmpty() }
-        } catch (e: Exception) {
-            Log.w(TAG, "Unable to read EF ${fid.toHex4()}: ${e.message}")
-            null
+            buf.toByteArray().takeIf { it.isNotEmpty() }
         }
+    } catch (e: Exception) {
+        Log.w(TAG, "Read EF ${"%04X".format(fid)} failed: ${e.message}")
+        null
     }
 
-    /* ------------------------------------------------------------------- */
-    /*  Extension helpers                                                  */
-    /* ------------------------------------------------------------------- */
+    private fun parseDG1(bytes: ByteArray): MrzFields {
+        val dg1 = DG1File(ByteArrayInputStream(bytes))
+        val m: MRZInfo = dg1.mrzInfo
+        return MrzFields(
+            documentCode    = m.documentCode,
+            documentNumber  = m.documentNumber,
+            issuingState    = m.issuingState,
+            nationality     = m.nationality,
+            primaryIdentifier   = m.primaryIdentifier,
+            secondaryIdentifier = m.secondaryIdentifier,
+            gender          = m.gender.toString(),
+            dateOfBirthYYMMDD  = m.dateOfBirth,
+            dateOfExpiryYYMMDD = m.dateOfExpiry,
+            optionalData1   = m.optionalData1,
+            optionalData2   = m.optionalData2,
+            personalNumber  = m.personalNumber
+        )
+    }
 
     private fun ByteArray.toHexString(): String = joinToString(" ") { "%02X".format(it) }
-    private fun ByteArray.id() = joinToString(" ") { "%02X".format(it) }
-    private fun Int.toHex4(): String = "%04X".format(this)
 }
