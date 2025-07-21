@@ -127,7 +127,7 @@ class MainActivity : ComponentActivity() {
                     NFCReadResult(
                         success = true,
                         idDocumentData = IDDocumentData(
-                            firstName = first.dataRead,  // placeholder: parse DG1 later
+                            firstName = first.toString(),  // placeholder: parse DG1 later
                             documentNumber = first.fileId,
                             dateOfBirth = dob.value,
                             dateOfExpiry = expiry.value
